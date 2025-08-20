@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import os
+from pyvis.network import Network
+import streamlit.components.v1 as components
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -58,6 +60,7 @@ def get_db_connection():
         st.error(f"Database connection error: {e}")
         return None
 
+
 @st.cache_data(ttl=600)
 def get_all_journalists():
     """Fetches all journalists from the database, including their unique rowid."""
@@ -72,6 +75,7 @@ def get_all_journalists():
             st.warning(f"Could not read from 'journalists' table. Has the database been created? Error: {e}")
             conn.close()
     return pd.DataFrame()
+
 
 def search_journalists(search_term):
     """
@@ -93,6 +97,7 @@ def search_journalists(search_term):
             conn.close()
     return pd.DataFrame()
 
+
 def add_interest_to_journalist(rowid, new_interest):
     """Appends a new interest to a journalist using their unique rowid."""
     conn = get_db_connection()
@@ -104,6 +109,10 @@ def add_interest_to_journalist(rowid, new_interest):
             result = cursor.fetchone()
             if result:
                 current_interests = result['Ämnesområden']
+                # Avoid adding if it already exists
+                if new_interest.strip().lower() in [i.lower() for i in current_interests.split(',')]:
+                    st.warning(f"'{new_interest}' already exists for this journalist.")
+                    return
                 updated_interests = f"{current_interests}, {new_interest.strip()}"
                 # 3. Update the database using the unique rowid
                 cursor.execute("UPDATE journalists SET Ämnesområden = ? WHERE rowid = ?", (updated_interests, rowid))
@@ -119,7 +128,7 @@ def add_interest_to_journalist(rowid, new_interest):
             get_all_journalists.clear()
 
 
-# --- UI Display Function ---
+# --- UI Display Functions ---
 
 def display_journalist(journalist):
     """Displays a single journalist's info and uses rowid for widget keys."""
@@ -140,27 +149,81 @@ def display_journalist(journalist):
         st.markdown("---")
         st.subheader("Lägg till nytt ämnesområde")
 
-        # FIX: Use the unique 'rowid' for the key to prevent duplicates.
         unique_key = journalist['rowid']
         new_interest = st.text_input("Nytt ämne:", key=f"interest_{unique_key}")
         if st.button("Spara ämne", key=f"btn_{unique_key}"):
-            # Pass the unique rowid to the update function
             add_interest_to_journalist(unique_key, new_interest)
             st.rerun()
+
+
+def generate_network_visualization(df):
+    """Generates and displays an interactive network graph of journalists and subjects."""
+    net = Network(height='750px', width='100%', bgcolor='#222222', font_color='white', notebook=True)
+
+    # Set physics layout for a better-looking graph
+    net.set_options("""
+    var options = {
+      "physics": {
+        "barnesHut": {
+          "gravitationalConstant": -30000,
+          "centralGravity": 0.3,
+          "springLength": 150
+        },
+        "minVelocity": 0.75
+      }
+    }
+    """)
+
+    journalists = df['Namn'].unique()
+    subjects = set()
+
+    # Process subjects
+    for sub_list in df['Ämnesområden'].dropna():
+        # Clean up subjects: split by comma, strip whitespace, remove empty strings and periods.
+        cleaned_subjects = [s.strip().replace('.', '') for s in sub_list.split(',') if s.strip()]
+        subjects.update(cleaned_subjects)
+
+    # Add nodes to the graph
+    for journalist in journalists:
+        net.add_node(journalist, label=journalist, title=journalist, color='#3498db', size=25)
+
+    for subject in subjects:
+        net.add_node(subject, label=subject, title=subject, color='#e74c3c', size=15)
+
+    # Add edges connecting journalists to their subjects
+    for _, row in df.iterrows():
+        journalist_name = row['Namn']
+        if pd.notna(row['Ämnesområden']):
+            journalist_subjects = [s.strip().replace('.', '') for s in row['Ämnesområden'].split(',') if s.strip()]
+            for subject in journalist_subjects:
+                net.add_edge(journalist_name, subject)
+
+    # Save and display the graph
+    try:
+        path = '/tmp'
+        if not os.path.exists(path):
+            os.makedirs(path)
+        file_path = os.path.join(path, 'pyvis_graph.html')
+        net.save_graph(file_path)
+        with open(file_path, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+        components.html(html_content, height=800)
+    except Exception as e:
+        st.error(f"Could not generate or display the graph: {e}")
 
 
 # --- Main Application Logic ---
 
 def main():
     st.title("🗃️ Journalistdatabas")
-    st.write("Sök i databasen eller lägg till nya ämnesområden för en journalist.")
+    st.write("Sök, redigera eller visualisera relationerna mellan journalister och deras ämnesområden.")
 
     if not os.path.exists(DB_FILE):
         st.error(f"Databasfilen '{DB_FILE}' hittades inte. Kör skriptet `create_db.py` först.")
         return
 
     st.sidebar.header("Kontroller")
-    app_mode = st.sidebar.radio("Välj läge", ["Sök", "Visa alla"])
+    app_mode = st.sidebar.radio("Välj läge", ["Sök", "Visa alla", "Nätverksvisualisering"])
 
     if app_mode == "Sök":
         st.header("🔍 Sök efter journalist")
@@ -187,6 +250,16 @@ def main():
             for index, journalist in all_journalists.iterrows():
                 with col1 if index % 2 == 0 else col2:
                     display_journalist(journalist)
+
+    elif app_mode == "Nätverksvisualisering":
+        st.header("🕸️ Nätverk av Journalister och Ämnen")
+        st.info("Klicka och dra noder för att utforska nätverket. Zooma med scrollhjulet.")
+        all_journalists = get_all_journalists()
+        if not all_journalists.empty:
+            generate_network_visualization(all_journalists)
+        else:
+            st.warning("Ingen data att visualisera.")
+
 
 if __name__ == "__main__":
     main()
